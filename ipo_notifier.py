@@ -31,8 +31,17 @@ def get_gmp_data():
     GMP_DATA_URL = os.environ['GMP_DATA_URL']
     
     try:
-        # Make GET request
-        with urllib.request.urlopen(GMP_DATA_URL) as response:
+        logger.debug(f"Checking the URL {GMP_DATA_URL}")
+        # Make GET request with browser-like headers to avoid 403 Forbidden
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Referer': 'https://webnodejs.investorgain.com/'
+        }
+        
+        req = urllib.request.Request(GMP_DATA_URL, headers=headers)
+        with urllib.request.urlopen(req) as response:
             if response.status != 200:
                 return "Error: Failed to fetch GMP data"
             
@@ -52,9 +61,10 @@ def get_gmp_data():
             # Use clean field names
             company_name = item.get('~ipo_name', '').strip()
             gmp_percent = item.get('~gmp_percent_calc', '')
+            closing_date = item.get('Close', '').split('<', 1)[0]
             
             if company_name and gmp_percent:
-                gmp_info.append(f"{company_name} - GMP: {gmp_percent}%")
+                gmp_info.append(f"- {company_name} (Closing on {closing_date}) - GMP: {gmp_percent}%")
         
         if not gmp_info:
             return "No valid GMP data found"
@@ -63,6 +73,7 @@ def get_gmp_data():
         return "\n".join(gmp_info)
         
     except Exception as e:
+        logger.error(f"Exception occurred while fetching GMP data: {str(e)}")
         return f"Error fetching GMP data: {str(e)}"
 
 def get_closing_ipo_data(is_sme: bool = False) -> (str, str):
@@ -116,9 +127,15 @@ def get_closing_ipo_data(is_sme: bool = False) -> (str, str):
     logger.debug(f"Sending title as {ipo_list_title}")
 
     # 3. Send IPO list to ntfy
-    data = (ipo_details or 'No mainline IPOs today')
+    data = (ipo_details or 'No mainline IPOs open today')
     return (ipo_list_title, data)
 
+def get_priority(ipo_list_title: str, ipo_details: str) -> int:
+    if not 'No mainline' in ipo_list_title:
+        return 5 # Some IPO is closing today. Highest priority
+    if 'No mainline' in ipo_details:
+        return 1 # No IPOs open today. Lowest priority
+    return 3 # default priority when IPOs are open, but nothing is closing today
 
 
 def lambda_handler(event, context):
@@ -126,13 +143,19 @@ def lambda_handler(event, context):
     NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
     try:
         ipo_list_title, data = get_closing_ipo_data()
-        data += "\nGMP data:\n" + get_gmp_data()
+        priority = get_priority(ipo_list_title, data)
+        tags = "rotating_light" if priority == 5 else "warning" if priority == 3 else "info"
+        data += "\n\nGMP data:\n" + get_gmp_data()
         req = urllib.request.Request(
             NTFY_URL,
             data=data.encode('utf-8'),
             headers={
                 "Content-Type": "text/plain",
                 "Title": ipo_list_title,
+                "Tags": tags,
+                "Priority": str(priority),
+                "Markdown": "yes",
+                "Actions": "view,Open Chittorgarh,https://www.chittorgarh.com/ipo/ipo_dashboard.asp,clear=false"
             },
             method='POST'
         )
